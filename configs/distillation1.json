@@ -1,0 +1,20 @@
+{
+  "teacher_model_path": "stevemobs/roberta-large-fine-tuned-squad-es",
+  "student_model_path": "models/tinyroberta-squad-es",
+  "checkpoint_dir": "checkpoints/tinyroberta-squad-es",
+  "overwrite_checkpoint": true,
+  "num_epochs": 50,
+  "batch_size": 16,
+  "max_length": 384,
+  "stride": 128,
+  "seed": 39812951,
+  "temperature": 2.0,
+  "alpha": 0.33,
+  "beta": 0.33,
+  "gamma": 0.33,
+  "fp16": false,
+  "max_grad_norm": 1.0,
+  "gradient_accumulation_steps": 1,
+  "max_steps": 0,
+  "learning_rate": 5e-5
+}

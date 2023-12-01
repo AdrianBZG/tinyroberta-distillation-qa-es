@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="53fffe62-66ad-4103-80fb-0192083e77b9" name="RUNPOD1">
+        <fileTransfer rootFolder="/root" accessType="SFTP" host="104.255.9.187" port="11085" sshConfigId="39dfaad9-ac23-47ae-8e8c-abb8b77f8d69" sshConfig="root@104.255.9.187:11085 key" keyPair="true">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

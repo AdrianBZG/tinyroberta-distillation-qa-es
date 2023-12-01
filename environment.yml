@@ -1,0 +1,25 @@
+name: tinyroberta-distillation-qa-es
+channels:
+  - defaults
+  - huggingface
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.11
+  - conda==23.10.0
+  - setuptools
+  - pip
+  - wheel
+  - conda-content-trust
+  - conda-libmamba-solver
+  - pytorch::pytorch
+  - pytorch::pytorch-cuda=12.1
+  - torchaudio
+  - torchvision
+  - huggingface::transformers==4.32.1
+  - conda-forge::accelerate==0.24.1
+  - conda-forge::nvidia-apex
+  - evaluate==0.4.1
+  - huggingface::datasets==2.14.6
+  - scikit-learn

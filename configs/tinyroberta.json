@@ -1,0 +1,4 @@
+{
+  "num_hidden_layers": 4,
+  "num_attention_heads": 8
+}
