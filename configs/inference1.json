@@ -1,0 +1,9 @@
+{
+  "model_path": "checkpoints/tinyroberta-squad-es/checkpoint-epoch-0",
+  "batch_size": 64,
+  "max_length": 384,
+  "n_best": 1,
+  "max_answer_length": 30,
+  "stride": 128,
+  "seed": 39812951
+}
