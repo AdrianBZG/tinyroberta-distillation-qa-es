@@ -55,5 +55,5 @@ if __name__ == "__main__":
     model = AutoModel.from_pretrained(args.base_model, config=config, torch_dtype=torch.float16)
     logging.info(f"Loaded model has {get_model_size(model)} parameters")
 
-    os.makedirs(args.output_dir, 0x666, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
     model.save_pretrained(args.output_dir, from_pt=True)
