@@ -265,7 +265,7 @@ if __name__ == "__main__":
         raise ValueError('Only fast tokenizers are supported.')
 
     squad_dataset = load_dataset("squad_es", SQUAD_VERSION)
-    train_dataset = prepare_data(squad_dataset["train"].select(range(100)), tokenizer, config_args)
+    train_dataset = prepare_data(squad_dataset["train"], tokenizer, config_args)
 
     # Prepare model and teacher model
     model, teacher_model = prepare_models(config_args)

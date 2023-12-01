@@ -3,7 +3,7 @@
   "student_model_path": "models/tinyroberta-squad-es",
   "checkpoint_dir": "checkpoints/tinyroberta-squad-es",
   "overwrite_checkpoint": true,
-  "num_epochs": 50,
+  "num_epochs": 5,
   "batch_size": 16,
   "max_length": 384,
   "stride": 128,
