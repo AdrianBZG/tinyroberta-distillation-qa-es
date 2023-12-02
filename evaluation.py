@@ -17,10 +17,10 @@ from constants import SQUAD_VERSION
 from utils import prepare_data, set_seed
 
 logging.basicConfig(level=logging.INFO,
-                    format='[inference:%(levelname)s] %(message)s')
+                    format='[evaluation:%(levelname)s] %(message)s')
 
 
-def inference_collate_func(data, device='cpu'):
+def evaluation_collate_func(data, device='cpu'):
     input_ids = torch.stack([torch.as_tensor(sample['input_ids']) for sample in data]).to(device)
     attention_mask = torch.stack([torch.as_tensor(sample['attention_mask']) for sample in data]).to(device)
     start_positions = torch.stack([torch.as_tensor(sample['start_positions']) for sample in data]).to(device)
@@ -33,8 +33,9 @@ def inference_collate_func(data, device='cpu'):
             'start_positions': start_positions,
             'end_positions': end_positions}
 
+
 @torch.no_grad()
-def run_inference(args, model, data_loader, dataset):
+def run_evaluation(args, model, data_loader, dataset):
     validation_start_logits = np.empty((len(data_loader.dataset), args['max_length']))
     validation_end_logits = np.empty((len(data_loader.dataset), args['max_length']))
 
@@ -110,7 +111,7 @@ def calculate_metrics(metric, squad_dataset, predicted_answers):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config_path',
-                        default="configs/inference1.json",
+                        default="configs/evaluation1.json",
                         required=True,
                         help='Path to the json config with the parameters for running evaluation of a model on Squad')
 
@@ -119,7 +120,7 @@ if __name__ == "__main__":
     if not os.path.exists(args.config_path):
         raise ValueError(f'Path to config {args.config_path} does not exist.')
 
-    logging.info(f"Loading parameters for inference from: {args.config_path}")
+    logging.info(f"Loading parameters for evaluation from: {args.config_path}")
     with open(args.config_path) as file:
         try:
             config_args = json.load(file)
@@ -138,7 +139,7 @@ if __name__ == "__main__":
     squad_dataset = load_dataset("squad_es", SQUAD_VERSION)["validation"]
     validation_dataset = prepare_data(squad_dataset, tokenizer, config_args)
     val_dataloader = DataLoader(validation_dataset, batch_size=config_args['batch_size'], shuffle=False,
-                                collate_fn=partial(inference_collate_func, device=device))
+                                collate_fn=partial(evaluation_collate_func, device=device))
 
     # Prepare model
     torch_dtype = torch.float16 if args['fp16'] else torch.float32
@@ -147,7 +148,7 @@ if __name__ == "__main__":
     model.eval()
 
     # Run predictions
-    predicted_answers = run_inference(config_args, model, val_dataloader, squad_dataset)
+    predicted_answers = run_evaluation(config_args, model, val_dataloader, squad_dataset)
 
     # Calculate metrics
     metric = evaluate.load("squad")
