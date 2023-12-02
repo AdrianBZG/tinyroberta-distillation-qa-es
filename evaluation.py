@@ -127,11 +127,11 @@ if __name__ == "__main__":
         except Exception as e:
             logging.error(e)
 
-    set_seed(args['seed'])
+    set_seed(config_args['seed'])
 
     # Prepare dataset
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    tokenizer = AutoTokenizer.from_pretrained(config_args['model_path'])
+    tokenizer = AutoTokenizer.from_pretrained("stevemobs/roberta-large-fine-tuned-squad-es")
 
     if not tokenizer.is_fast:
         raise ValueError('Only fast tokenizers are supported.')
@@ -142,7 +142,7 @@ if __name__ == "__main__":
                                 collate_fn=partial(evaluation_collate_func, device=device))
 
     # Prepare model
-    torch_dtype = torch.float16 if args['fp16'] else torch.float32
+    torch_dtype = torch.float16 if config_args['fp16'] else torch.float32
     model = AutoModelForQuestionAnswering.from_pretrained(config_args['model_path'],
                                                           torch_dtype=torch_dtype).to(device)
     model.eval()

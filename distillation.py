@@ -155,6 +155,7 @@ def train(args, dataset, model, tokenizer, teacher=None):
         model_to_save = model.module if hasattr(model, 'module') else model
         model_to_save.save_pretrained(output_dir)
         torch.save(args, os.path.join(output_dir, 'training_args.bin'))
+        tokenizer.save_pretrained(output_dir)
 
         if 0 < args['max_steps'] < global_step:
             train_iterator.close()

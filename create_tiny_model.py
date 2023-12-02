@@ -5,6 +5,7 @@ import json
 import os
 import torch
 from transformers import AutoConfig, AutoModel
+from utils import set_seed
 
 logging.basicConfig(level=logging.INFO,
                     format='[create_tiny_model:%(levelname)s] %(message)s')
@@ -36,6 +37,8 @@ if __name__ == "__main__":
 
     if not os.path.exists(args.config_path):
         raise ValueError(f'Path to config {args.config_path} does not exist.')
+
+    set_seed(39812951)
 
     logging.info(f"Getting config for base_model: {args.base_model}")
     config = AutoConfig.from_pretrained(args.base_model)
