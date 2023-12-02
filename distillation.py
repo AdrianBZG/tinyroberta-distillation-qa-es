@@ -54,17 +54,20 @@ def train(args, dataset, model, tokenizer, teacher=None):
     else:
         num_training_steps = len(train_dataloader) // args['gradient_accumulation_steps'] * args['num_epochs']
 
+    num_warmup_steps = int(num_training_steps * args['warmup_proportion'])
+
     # Report training info
     logging.info("***** Running training *****")
     logging.info("  Num examples = %d", len(dataset))
     logging.info("  Num Epochs = %d", args['num_epochs'])
+    logging.info("  Warmup steps = %d", num_warmup_steps)
     logging.info("  Total optimization steps = %d", num_training_steps)
 
-    optimizer = AdamW(model.parameters(), lr=args['learning_rate'])
+    optimizer = AdamW(model.parameters(), lr=args['learning_rate'], eps=args['eps'])
     scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
-        num_warmup_steps=0,
+        num_warmup_steps=num_warmup_steps,
         num_training_steps=num_training_steps,
     )
 
@@ -135,7 +138,8 @@ def train(args, dataset, model, tokenizer, teacher=None):
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
 
-            logging.info(f'Epoch {epoch+1}, Step {step+1} - Loss: {loss.item()}')
+            is_doing_warmup = global_step < num_warmup_steps
+            logging.info(f'Epoch {epoch+1}/{args["num_epochs"]}, Step {step+1}, Global: {global_step}/{num_training_steps} - Warmup: {"Yes" if is_doing_warmup else "No"} - Loss: {loss.item()}')
 
             tr_loss += loss.item()
             if (step + 1) % args['gradient_accumulation_steps'] == 0:
