@@ -73,7 +73,7 @@ def train(args, dataset, model, tokenizer, teacher=None):
             from apex import amp
         except ImportError:
             raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-        model, optimizer = amp.initialize(model, optimizer, opt_level='O1')
+        model, optimizer = amp.initialize(model.float(), optimizer, opt_level='O1')
 
     global_step = 0
     tr_loss = 0.0
@@ -89,10 +89,10 @@ def train(args, dataset, model, tokenizer, teacher=None):
             if teacher is not None:
                 teacher.eval()
 
-            inputs = {'input_ids': batch['input_ids'],
-                      'attention_mask': batch['attention_mask'],
-                      'start_positions': batch['start_positions'],
-                      'end_positions': batch['end_positions']}
+            inputs = {'input_ids': batch['input_ids'].to(model.device),
+                      'attention_mask': batch['attention_mask'].to(model.device),
+                      'start_positions': batch['start_positions'].to(model.device),
+                      'end_positions': batch['end_positions'].to(model.device)}
 
             outputs = model(**inputs, return_dict=True, output_hidden_states=True)
             loss, start_logits, end_logits, hidden_states = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1]
@@ -100,8 +100,8 @@ def train(args, dataset, model, tokenizer, teacher=None):
             # Get distillation loss using the teacher model
             if teacher is not None:
                 with torch.no_grad():
-                    outputs_teacher = teacher(input_ids=batch['input_ids'],
-                                              attention_mask=batch['attention_mask'],
+                    outputs_teacher = teacher(input_ids=batch['input_ids'].to(teacher.device),
+                                              attention_mask=batch['attention_mask'].to(teacher.device),
                                               return_dict=True,
                                               output_hidden_states=True)
                     start_logits_teacher, end_logits_teacher, hidden_states_teacher = outputs_teacher.start_logits, outputs_teacher.end_logits, outputs_teacher.hidden_states[-1]
@@ -190,7 +190,10 @@ if __name__ == "__main__":
     train_dataset = prepare_data(squad_dataset["train"], tokenizer, config_args)
 
     # Prepare model and teacher model
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model, teacher_model = prepare_models(config_args)
+    model.to(device)
+    teacher_model.to(device)
 
     # Prepare checkpoint output directory
     prepare_checkpoint_directory(config_args)

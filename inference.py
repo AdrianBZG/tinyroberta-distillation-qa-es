@@ -14,7 +14,7 @@ from datasets import load_dataset
 import evaluate
 
 from constants import SQUAD_VERSION
-from utils import prepare_data
+from utils import prepare_data, set_seed
 
 logging.basicConfig(level=logging.INFO,
                     format='[inference:%(levelname)s] %(message)s')
@@ -126,9 +126,10 @@ if __name__ == "__main__":
         except Exception as e:
             logging.error(e)
 
+    set_seed(args['seed'])
+
     # Prepare dataset
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    device = 'mps'
     tokenizer = AutoTokenizer.from_pretrained(config_args['model_path'])
 
     if not tokenizer.is_fast:
@@ -140,8 +141,9 @@ if __name__ == "__main__":
                                 collate_fn=partial(inference_collate_func, device=device))
 
     # Prepare model
+    torch_dtype = torch.float16 if args['fp16'] else torch.float32
     model = AutoModelForQuestionAnswering.from_pretrained(config_args['model_path'],
-                                                          torch_dtype=torch.float32).to(device)
+                                                          torch_dtype=torch_dtype).to(device)
     model.eval()
 
     # Run predictions
