@@ -9,15 +9,14 @@ from transformers.utils import ModelOutput
 
 
 class CustomRobertaForQuestionAnswering(RobertaPreTrainedModel):
-    def __init__(self, config, fit_size=None):
+    def __init__(self, config, fit_size=768):
         super().__init__(config)
         self.num_labels = config.num_labels
 
         self.roberta = RobertaModel(config, add_pooling_layer=False)
         self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
         self.fit_size = fit_size
-        if fit_size:
-            self.fit_dense = nn.Linear(config.hidden_size, fit_size)
+        self.fit_dense = nn.Linear(config.hidden_size, fit_size)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -35,6 +34,7 @@ class CustomRobertaForQuestionAnswering(RobertaPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        is_student: Optional[bool] = False
     ) -> Union[Tuple[torch.Tensor], QuestionAnsweringModelOutput]:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
@@ -78,7 +78,7 @@ class CustomRobertaForQuestionAnswering(RobertaPreTrainedModel):
             output = (start_logits, end_logits) + outputs[2:]
             return ((total_loss,) + output) if total_loss is not None else output
 
-        if self.fit_size:
+        if is_student:
             tmp = []
             for s_id, sequence_layer in enumerate(outputs.hidden_states):
                 tmp.append(self.fit_dense(sequence_layer))
@@ -90,7 +90,7 @@ class CustomRobertaForQuestionAnswering(RobertaPreTrainedModel):
             end_logits=end_logits,
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
-            sequence_output=sequence_output if self.fit_size else outputs.hidden_states
+            sequence_output=sequence_output if is_student else outputs.hidden_states
         )
 
 

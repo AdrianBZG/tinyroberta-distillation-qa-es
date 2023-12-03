@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, RandomSampler
 from torch.optim import AdamW
+from torch.cuda.amp import GradScaler
 import logging
 from tqdm import tqdm, trange
 from transformers import (AutoTokenizer, AutoModelForQuestionAnswering, TrainingArguments, Trainer, DefaultDataCollator,
@@ -22,12 +23,9 @@ logging.basicConfig(level=logging.INFO,
 
 
 def prepare_models(args):
-    torch_dtype = torch.float16 if args['fp16'] else torch.float32
-    teacher_model = CustomRobertaForQuestionAnswering.from_pretrained(args['teacher_model_path'],
-                                                                      torch_dtype=torch_dtype)
+    teacher_model = CustomRobertaForQuestionAnswering.from_pretrained(args['teacher_model_path'])
     model = CustomRobertaForQuestionAnswering.from_pretrained(args['student_model_path'],
-                                                              fit_size=teacher_model.config.hidden_size,
-                                                              torch_dtype=torch_dtype)
+                                                              fit_size=teacher_model.config.hidden_size)
     freeze_model(teacher_model)
     return model, teacher_model
 
@@ -81,15 +79,10 @@ def train(args, dataset, model, tokenizer, teacher=None):
         num_training_steps=num_training_steps,
     )
 
-    if args['fp16']:
-        try:
-            from apex import amp
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-        model, optimizer = amp.initialize(model.float(), optimizer, opt_level='O1')
-
     global_step = 0
     tr_loss = 0.0
+
+    scaler = GradScaler()
 
     model.zero_grad()
     train_iterator = trange(int(args['num_epochs']), desc="Epoch")
@@ -107,69 +100,74 @@ def train(args, dataset, model, tokenizer, teacher=None):
                       'start_positions': batch['start_positions'].to(model.device),
                       'end_positions': batch['end_positions'].to(model.device)}
 
-            outputs = model(**inputs, return_dict=True, output_hidden_states=True, output_attentions=True)
-            loss, start_logits, end_logits, hidden_states, attentions, seq_output = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1], outputs.attentions, outputs.sequence_output
+            with torch.autocast(device_type="cuda", dtype=torch.float16 if args['fp16'] else torch.float32):
+                outputs = model(**inputs, return_dict=True, output_hidden_states=True, output_attentions=True, is_student=True)
+                loss, start_logits, end_logits, hidden_states, attentions, seq_output = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1], outputs.attentions, outputs.sequence_output
 
-            # Get distillation losses using the teacher model
-            if teacher is not None:
-                attention_loss = 0.
-                hidden_loss = 0.
+                # Get distillation losses using the teacher model
+                if teacher is not None:
+                    attention_loss = 0.
+                    hidden_loss = 0.
 
-                loss_states_func = nn.MSELoss()
+                    loss_states_func = nn.MSELoss()
 
-                with torch.no_grad():
-                    outputs_teacher = teacher(input_ids=batch['input_ids'].to(teacher.device),
-                                              attention_mask=batch['attention_mask'].to(teacher.device),
-                                              return_dict=True,
-                                              output_hidden_states=True,
-                                              output_attentions=True)
-                    start_logits_teacher, end_logits_teacher, hidden_states_teacher, attentions_teacher, seq_output_teacher = outputs_teacher.start_logits, outputs_teacher.end_logits, outputs_teacher.hidden_states[-1], outputs_teacher.attentions, outputs_teacher.sequence_output
+                    with torch.no_grad():
+                        outputs_teacher = teacher(input_ids=batch['input_ids'].to(teacher.device),
+                                                  attention_mask=batch['attention_mask'].to(teacher.device),
+                                                  return_dict=True,
+                                                  output_hidden_states=True,
+                                                  output_attentions=True)
+                        start_logits_teacher, end_logits_teacher, hidden_states_teacher, attentions_teacher, seq_output_teacher = outputs_teacher.start_logits, outputs_teacher.end_logits, outputs_teacher.hidden_states[-1], outputs_teacher.attentions, outputs_teacher.sequence_output
 
-                teacher_layer_num = len(attentions_teacher)
-                student_layer_num = len(attentions)
-                assert teacher_layer_num % student_layer_num == 0
+                    teacher_layer_num = len(attentions_teacher)
+                    student_layer_num = len(attentions)
+                    assert teacher_layer_num % student_layer_num == 0
 
-                # Attention loss
-                layers_per_block = int(teacher_layer_num / student_layer_num)
-                new_teacher_atts = [attentions_teacher[i * layers_per_block + layers_per_block - 1]
-                                    for i in range(student_layer_num)]
-                assert len(attentions) == len(new_teacher_atts)
-                assert new_teacher_atts[0].size() == attentions[0].size()
-                for student_att, teacher_att in zip(attentions, new_teacher_atts):
-                    student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(student_att.device),
-                                              student_att)
-                    teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(teacher_att.device),
-                                              teacher_att)
+                    # Attention loss
+                    layers_per_block = int(teacher_layer_num / student_layer_num)
+                    new_teacher_atts = [attentions_teacher[i * layers_per_block + layers_per_block - 1]
+                                        for i in range(student_layer_num)]
+                    assert len(attentions) == len(new_teacher_atts)
+                    assert new_teacher_atts[0].size() == attentions[0].size()
+                    for student_att, teacher_att in zip(attentions, new_teacher_atts):
+                        student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(student_att.device),
+                                                  student_att)
+                        teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(teacher_att.device),
+                                                  teacher_att)
 
-                    tmp_loss = loss_states_func(student_att, teacher_att)
-                    attention_loss += tmp_loss
+                        tmp_loss = loss_states_func(student_att, teacher_att)
+                        attention_loss += tmp_loss
 
-                # Representation loss
-                new_teacher_seq_output = [seq_output_teacher[i * layers_per_block] for i in range(student_layer_num + 1)]
-                assert len(new_teacher_seq_output) == len(seq_output)
-                assert new_teacher_seq_output[0].size() == seq_output[0].size()
-                for student_seqout, teacher_seqout in zip(seq_output, new_teacher_seq_output):
-                    tmp_loss = loss_states_func(student_seqout, teacher_seqout)
-                    hidden_loss += tmp_loss
+                    # Representation loss
+                    new_teacher_seq_output = [seq_output_teacher[i * layers_per_block] for i in range(student_layer_num + 1)]
+                    assert len(new_teacher_seq_output) == len(seq_output)
+                    assert new_teacher_seq_output[0].size() == seq_output[0].size()
+                    for student_seqout, teacher_seqout in zip(seq_output, new_teacher_seq_output):
+                        tmp_loss = loss_states_func(student_seqout, teacher_seqout)
+                        hidden_loss += tmp_loss
 
-                assert start_logits_teacher.size() == start_logits.size()
-                assert end_logits_teacher.size() == end_logits.size()
+                    assert start_logits_teacher.size() == start_logits.size()
+                    assert end_logits_teacher.size() == end_logits.size()
 
-                # Calculate distillation loss (start and end logits)
-                loss_start = soft_cross_entropy(start_logits / args['temperature'],
-                                                start_logits_teacher / args['temperature'])
+                    # Calculate distillation loss (start and end logits)
+                    loss_start = soft_cross_entropy(start_logits / args['temperature'],
+                                                    start_logits_teacher / args['temperature'])
 
-                loss_end = soft_cross_entropy(end_logits / args['temperature'],
-                                              end_logits_teacher / args['temperature'])
+                    loss_end = soft_cross_entropy(end_logits / args['temperature'],
+                                                  end_logits_teacher / args['temperature'])
 
-                loss_distill = loss_start + loss_end
+                    loss_distill = loss_start + loss_end
 
-                loss = loss_distill + loss + attention_loss + hidden_loss
+                    loss = loss_distill + loss + attention_loss + hidden_loss
 
             if args['fp16']:
-                with amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-                torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), args['max_grad_norm'])
+                scaler.scale(loss).backward()
+
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
+
+                scaler.step(optimizer)
+                scaler.update()
             else:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
