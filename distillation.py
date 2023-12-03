@@ -6,7 +6,6 @@ import os
 import json
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader, RandomSampler
 from torch.optim import AdamW
 import logging
@@ -14,7 +13,8 @@ from tqdm import tqdm, trange
 from transformers import (AutoTokenizer, AutoModelForQuestionAnswering, TrainingArguments, Trainer, DefaultDataCollator,
                           get_scheduler)
 
-from utils import set_seed, freeze_model, prepare_data
+from modeling import CustomRobertaForQuestionAnswering
+from utils import set_seed, freeze_model, prepare_data, soft_cross_entropy
 from constants import SQUAD_VERSION
 
 logging.basicConfig(level=logging.INFO,
@@ -23,8 +23,11 @@ logging.basicConfig(level=logging.INFO,
 
 def prepare_models(args):
     torch_dtype = torch.float16 if args['fp16'] else torch.float32
-    model = AutoModelForQuestionAnswering.from_pretrained(args['student_model_path'], torch_dtype=torch_dtype)
-    teacher_model = AutoModelForQuestionAnswering.from_pretrained(args['teacher_model_path'], torch_dtype=torch_dtype)
+    teacher_model = CustomRobertaForQuestionAnswering.from_pretrained(args['teacher_model_path'],
+                                                                      torch_dtype=torch_dtype)
+    model = CustomRobertaForQuestionAnswering.from_pretrained(args['student_model_path'],
+                                                              fit_size=teacher_model.config.hidden_size,
+                                                              torch_dtype=torch_dtype)
     freeze_model(teacher_model)
     return model, teacher_model
 
@@ -63,7 +66,14 @@ def train(args, dataset, model, tokenizer, teacher=None):
     logging.info("  Warmup steps = %d", num_warmup_steps)
     logging.info("  Total optimization steps = %d", num_training_steps)
 
-    optimizer = AdamW(model.parameters(), lr=args['learning_rate'], eps=args['eps'])
+    param_optimizer = list(model.named_parameters())
+    no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+    optimizer_grouped_parameters = [
+        {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
+        {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+    ]
+
+    optimizer = AdamW(optimizer_grouped_parameters, lr=args['learning_rate'], eps=args['eps'])
     scheduler = get_scheduler(
         "linear",
         optimizer=optimizer,
@@ -97,38 +107,64 @@ def train(args, dataset, model, tokenizer, teacher=None):
                       'start_positions': batch['start_positions'].to(model.device),
                       'end_positions': batch['end_positions'].to(model.device)}
 
-            outputs = model(**inputs, return_dict=True, output_hidden_states=True)
-            loss, start_logits, end_logits, hidden_states = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1]
+            outputs = model(**inputs, return_dict=True, output_hidden_states=True, output_attentions=True)
+            loss, start_logits, end_logits, hidden_states, attentions, seq_output = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1], outputs.attentions, outputs.sequence_output
 
-            # Get distillation loss using the teacher model
+            # Get distillation losses using the teacher model
             if teacher is not None:
+                attention_loss = 0.
+                hidden_loss = 0.
+
+                loss_states_func = nn.MSELoss()
+
                 with torch.no_grad():
                     outputs_teacher = teacher(input_ids=batch['input_ids'].to(teacher.device),
                                               attention_mask=batch['attention_mask'].to(teacher.device),
                                               return_dict=True,
-                                              output_hidden_states=True)
-                    start_logits_teacher, end_logits_teacher, hidden_states_teacher = outputs_teacher.start_logits, outputs_teacher.end_logits, outputs_teacher.hidden_states[-1]
+                                              output_hidden_states=True,
+                                              output_attentions=True)
+                    start_logits_teacher, end_logits_teacher, hidden_states_teacher, attentions_teacher, seq_output_teacher = outputs_teacher.start_logits, outputs_teacher.end_logits, outputs_teacher.hidden_states[-1], outputs_teacher.attentions, outputs_teacher.sequence_output
+
+                teacher_layer_num = len(attentions_teacher)
+                student_layer_num = len(attentions)
+                assert teacher_layer_num % student_layer_num == 0
+
+                # Attention loss
+                layers_per_block = int(teacher_layer_num / student_layer_num)
+                new_teacher_atts = [attentions_teacher[i * layers_per_block + layers_per_block - 1]
+                                    for i in range(student_layer_num)]
+                assert len(attentions) == len(new_teacher_atts)
+                assert new_teacher_atts[0].size() == attentions[0].size()
+                for student_att, teacher_att in zip(attentions, new_teacher_atts):
+                    student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(student_att.device),
+                                              student_att)
+                    teacher_att = torch.where(teacher_att <= -1e2, torch.zeros_like(teacher_att).to(teacher_att.device),
+                                              teacher_att)
+
+                    tmp_loss = loss_states_func(student_att, teacher_att)
+                    attention_loss += tmp_loss
+
+                # Representation loss
+                new_teacher_seq_output = [seq_output_teacher[i * layers_per_block] for i in range(student_layer_num + 1)]
+                assert len(new_teacher_seq_output) == len(seq_output)
+                assert new_teacher_seq_output[0].size() == seq_output[0].size()
+                for student_seqout, teacher_seqout in zip(seq_output, new_teacher_seq_output):
+                    tmp_loss = loss_states_func(student_seqout, teacher_seqout)
+                    hidden_loss += tmp_loss
 
                 assert start_logits_teacher.size() == start_logits.size()
                 assert end_logits_teacher.size() == end_logits.size()
-                assert hidden_states_teacher.size() == hidden_states.size()
 
                 # Calculate distillation loss (start and end logits)
-                loss_distill_func = nn.KLDivLoss(reduction='batchmean')
-                loss_start = loss_distill_func(F.log_softmax(start_logits / args['temperature'], dim=-1),
-                                               F.softmax(start_logits_teacher / args['temperature'], dim=-1)) * (args['temperature'] ** 2)
-                loss_end = loss_distill_func(F.log_softmax(end_logits / args['temperature'], dim=-1),
-                                             F.softmax(end_logits_teacher / args['temperature'], dim=-1)) * (args['temperature'] ** 2)
-                loss_distill = (loss_start + loss_end) / 2.
+                loss_start = soft_cross_entropy(start_logits / args['temperature'],
+                                                start_logits_teacher / args['temperature'])
 
-                # Calculate hidden states loss (last layer hidden representations) as cosine distance.
-                # Target is a vector of ones
-                loss_hidden_states_func = nn.CosineEmbeddingLoss(reduction='sum')
-                loss_hidden_states = loss_hidden_states_func(hidden_states[:, 0, :] / args['temperature'],
-                                                             hidden_states_teacher[:, 0, :] / args['temperature'],
-                                                             target=torch.ones(hidden_states.size(0)).to(hidden_states.device))
+                loss_end = soft_cross_entropy(end_logits / args['temperature'],
+                                              end_logits_teacher / args['temperature'])
 
-                loss = args['alpha'] * loss_distill + args['beta'] * loss + args['gamma'] * loss_hidden_states
+                loss_distill = loss_start + loss_end
+
+                loss = loss_distill + loss + attention_loss + hidden_loss
 
             if args['fp16']:
                 with amp.scale_loss(loss, optimizer) as scaled_loss:

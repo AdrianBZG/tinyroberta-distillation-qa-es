@@ -90,3 +90,9 @@ def prepare_data(dataset, tokenizer, args):
     )
 
     return train_dataset
+
+
+def soft_cross_entropy(predicts, targets):
+    student_likelihood = torch.nn.functional.log_softmax(predicts, dim=-1)
+    targets_prob = torch.nn.functional.softmax(targets, dim=-1)
+    return (- targets_prob * student_likelihood).mean()

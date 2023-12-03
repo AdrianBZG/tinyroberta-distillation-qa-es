@@ -55,7 +55,8 @@ if __name__ == "__main__":
     config.update(params_to_change)
     logging.info(f"Final config to load the model with: {config}")
 
-    model = AutoModel.from_pretrained(args.base_model, config=config, torch_dtype=torch.float16)
+    model = AutoModel.from_pretrained(args.base_model, config=config, ignore_mismatched_sizes=True,
+                                      torch_dtype=torch.float16)
     logging.info(f"Loaded model has {get_model_size(model)} parameters")
 
     os.makedirs(args.output_dir, exist_ok=True)

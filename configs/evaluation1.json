@@ -1,5 +1,5 @@
 {
-  "model_path": "checkpoints/tinyroberta-squad-es/checkpoint-epoch-45",
+  "model_path": "stevemobs/roberta-large-fine-tuned-squad-es",
   "batch_size": 16,
   "max_length": 384,
   "n_best": 1,
