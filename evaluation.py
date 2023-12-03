@@ -131,12 +131,12 @@ if __name__ == "__main__":
 
     # Prepare dataset
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-    tokenizer = AutoTokenizer.from_pretrained("stevemobs/roberta-large-fine-tuned-squad-es")
+    tokenizer = AutoTokenizer.from_pretrained(config_args['model_path'])
 
     if not tokenizer.is_fast:
         raise ValueError('Only fast tokenizers are supported.')
 
-    squad_dataset = load_dataset("squad_es", SQUAD_VERSION)["validation"]
+    squad_dataset = load_dataset("squad_es", SQUAD_VERSION)["validation"].select(range(200))
     validation_dataset = prepare_data(squad_dataset, tokenizer, config_args)
     val_dataloader = DataLoader(validation_dataset, batch_size=config_args['batch_size'], shuffle=False,
                                 collate_fn=partial(evaluation_collate_func, device=device))
