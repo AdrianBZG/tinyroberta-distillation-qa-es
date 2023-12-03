@@ -23,7 +23,9 @@ logging.basicConfig(level=logging.INFO,
 
 
 def prepare_models(args):
-    teacher_model = CustomRobertaForQuestionAnswering.from_pretrained(args['teacher_model_path'])
+    torch_dtype = torch.float16 if config_args['fp16'] else torch.float32
+    teacher_model = CustomRobertaForQuestionAnswering.from_pretrained(args['teacher_model_path'],
+                                                                      torch_dtype=torch_dtype)
     model = CustomRobertaForQuestionAnswering.from_pretrained(args['student_model_path'],
                                                               fit_size=teacher_model.config.hidden_size)
     freeze_model(teacher_model)
@@ -82,15 +84,19 @@ def train(args, dataset, model, tokenizer, teacher=None):
     global_step = 0
     tr_loss = 0.0
 
-    scaler = GradScaler()
+    if args['fp16']:
+        scaler = GradScaler(growth_interval=args['growth_interval'])
 
-    model.zero_grad()
+    optimizer.zero_grad()
     train_iterator = trange(int(args['num_epochs']), desc="Epoch")
     set_seed(args['seed'])
+
+    loss_states_func = nn.MSELoss()
 
     for epoch in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
         for step, batch in enumerate(epoch_iterator):
+            optimizer.zero_grad()
             model.train()
             if teacher is not None:
                 teacher.eval()
@@ -100,7 +106,9 @@ def train(args, dataset, model, tokenizer, teacher=None):
                       'start_positions': batch['start_positions'].to(model.device),
                       'end_positions': batch['end_positions'].to(model.device)}
 
-            with torch.autocast(device_type="cuda", dtype=torch.float16 if args['fp16'] else torch.float32):
+            with torch.autocast(device_type="cuda",
+                                dtype=torch.float16 if args['fp16'] else torch.float32,
+                                enabled=True if args['fp16'] else False):
                 outputs = model(**inputs, return_dict=True, output_hidden_states=True, output_attentions=True, is_student=True)
                 loss, start_logits, end_logits, hidden_states, attentions, seq_output = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1], outputs.attentions, outputs.sequence_output
 
@@ -108,8 +116,6 @@ def train(args, dataset, model, tokenizer, teacher=None):
                 if teacher is not None:
                     attention_loss = 0.
                     hidden_loss = 0.
-
-                    loss_states_func = nn.MSELoss()
 
                     with torch.no_grad():
                         outputs_teacher = teacher(input_ids=batch['input_ids'].to(teacher.device),
@@ -129,6 +135,7 @@ def train(args, dataset, model, tokenizer, teacher=None):
                                         for i in range(student_layer_num)]
                     assert len(attentions) == len(new_teacher_atts)
                     assert new_teacher_atts[0].size() == attentions[0].size()
+
                     for student_att, teacher_att in zip(attentions, new_teacher_atts):
                         student_att = torch.where(student_att <= -1e2, torch.zeros_like(student_att).to(student_att.device),
                                                   student_att)
@@ -142,6 +149,7 @@ def train(args, dataset, model, tokenizer, teacher=None):
                     new_teacher_seq_output = [seq_output_teacher[i * layers_per_block] for i in range(student_layer_num + 1)]
                     assert len(new_teacher_seq_output) == len(seq_output)
                     assert new_teacher_seq_output[0].size() == seq_output[0].size()
+
                     for student_seqout, teacher_seqout in zip(seq_output, new_teacher_seq_output):
                         tmp_loss = loss_states_func(student_seqout, teacher_seqout)
                         hidden_loss += tmp_loss
@@ -162,12 +170,8 @@ def train(args, dataset, model, tokenizer, teacher=None):
 
             if args['fp16']:
                 scaler.scale(loss).backward()
-
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
-
-                scaler.step(optimizer)
-                scaler.update()
             else:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
@@ -177,9 +181,26 @@ def train(args, dataset, model, tokenizer, teacher=None):
 
             tr_loss += loss.item()
             if (step + 1) % args['gradient_accumulation_steps'] == 0:
-                optimizer.step()
-                scheduler.step()  # Update learning rate schedule
-                model.zero_grad()
+                if args['fp16']:
+                    scaler.step(optimizer)
+
+                    scale = scaler.get_scale()
+                    scaler.update()
+
+                    skip_lr_sched = (scale > scaler.get_scale())
+
+                    if not skip_lr_sched:
+                        scheduler.step()
+
+                    # NaN scaling fix: see https://github.com/pytorch/pytorch/issues/40497
+                    if scaler.get_growth_interval() != 2000 and global_step > 1000:
+                        scaler.set_growth_interval(2000)
+
+                else:
+                    optimizer.step()
+                    scheduler.step()  # Update learning rate schedule
+
+                #model.zero_grad()
                 global_step += 1
 
             if 0 < args['max_steps'] < global_step:
