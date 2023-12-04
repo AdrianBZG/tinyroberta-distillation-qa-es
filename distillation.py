@@ -6,6 +6,7 @@ import os
 import json
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, RandomSampler
 from torch.optim import AdamW
 from torch.cuda.amp import GradScaler
@@ -92,6 +93,7 @@ def train(args, dataset, model, tokenizer, teacher=None):
     set_seed(args['seed'])
 
     loss_states_func = nn.MSELoss()
+    loss_distill_func = nn.KLDivLoss(reduction='batchmean')
 
     for epoch in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
@@ -110,7 +112,7 @@ def train(args, dataset, model, tokenizer, teacher=None):
                                 dtype=torch.float16 if args['fp16'] else torch.float32,
                                 enabled=True if args['fp16'] else False):
                 outputs = model(**inputs, return_dict=True, output_hidden_states=True, output_attentions=True, is_student=True)
-                loss, start_logits, end_logits, hidden_states, attentions, seq_output = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1], outputs.attentions, outputs.sequence_output
+                loss_task, start_logits, end_logits, hidden_states, attentions, seq_output = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1], outputs.attentions, outputs.sequence_output
 
                 # Get distillation losses using the teacher model
                 if teacher is not None:
@@ -158,15 +160,16 @@ def train(args, dataset, model, tokenizer, teacher=None):
                     assert end_logits_teacher.size() == end_logits.size()
 
                     # Calculate distillation loss (start and end logits)
-                    loss_start = soft_cross_entropy(start_logits / args['temperature'],
-                                                    start_logits_teacher / args['temperature'])
-
-                    loss_end = soft_cross_entropy(end_logits / args['temperature'],
-                                                  end_logits_teacher / args['temperature'])
+                    loss_start = loss_distill_func(F.log_softmax(start_logits / args['temperature'], dim=-1),
+                                                   F.softmax(start_logits_teacher / args['temperature'], dim=-1)) * (
+                                             args['temperature'] ** 2)
+                    loss_end = loss_distill_func(F.log_softmax(end_logits / args['temperature'], dim=-1),
+                                                 F.softmax(end_logits_teacher / args['temperature'], dim=-1)) * (
+                                           args['temperature'] ** 2)
 
                     loss_distill = loss_start + loss_end
 
-                    loss = loss_distill + loss + attention_loss + hidden_loss
+                    loss = loss_distill + loss_task + attention_loss + hidden_loss
 
             if args['fp16']:
                 scaler.scale(loss).backward()
@@ -177,7 +180,7 @@ def train(args, dataset, model, tokenizer, teacher=None):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
 
             is_doing_warmup = global_step < num_warmup_steps
-            logging.info(f'Epoch {epoch+1}/{args["num_epochs"]}, Step {step+1}, Global: {global_step}/{num_training_steps} - Warmup: {"Yes" if is_doing_warmup else "No"} - Loss: {loss.item()}')
+            logging.info(f'Epoch {epoch+1}/{args["num_epochs"]}, Step {step+1}, Global: {global_step}/{num_training_steps} - Warmup: {"Yes" if is_doing_warmup else "No"} - Loss: {loss.item()} - Loss task: {loss_task.item()} - Loss distill: {loss_distill.item()}')
 
             tr_loss += loss.item()
             if (step + 1) % args['gradient_accumulation_steps'] == 0:
