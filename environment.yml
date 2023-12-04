@@ -19,7 +19,6 @@ dependencies:
   - torchvision
   - transformers
   - accelerate
-  - nvidia-apex
   - evaluate
   - datasets
   - scikit-learn

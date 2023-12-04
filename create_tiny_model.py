@@ -4,6 +4,8 @@ import logging
 import json
 import os
 import torch
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 from transformers import AutoConfig, AutoModel
 from utils import set_seed
 

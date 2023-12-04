@@ -4,7 +4,7 @@
   "checkpoint_dir": "checkpoints/tinyroberta-squad-es",
   "overwrite_checkpoint": true,
   "num_epochs": 10,
-  "batch_size": 32,
+  "batch_size": 64,
   "max_length": 384,
   "stride": 128,
   "seed": 39812951,
@@ -14,7 +14,7 @@
   "max_grad_norm": 1.0,
   "gradient_accumulation_steps": 1,
   "max_steps": 0,
-  "learning_rate": 5e-5,
+  "learning_rate": 3e-5,
   "eps": 1e-8,
-  "warmup_proportion": 0.1
+  "warmup_proportion": 0.2
 }

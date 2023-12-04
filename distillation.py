@@ -14,6 +14,7 @@ import logging
 from tqdm import tqdm, trange
 from transformers import (AutoTokenizer, AutoModelForQuestionAnswering, TrainingArguments, Trainer, DefaultDataCollator,
                           get_scheduler)
+from accelerate import Accelerator
 
 from modeling import CustomRobertaForQuestionAnswering
 from utils import set_seed, freeze_model, prepare_data, soft_cross_entropy
@@ -24,9 +25,8 @@ logging.basicConfig(level=logging.INFO,
 
 
 def prepare_models(args):
-    torch_dtype = torch.float16 if config_args['fp16'] else torch.float32
-    teacher_model = CustomRobertaForQuestionAnswering.from_pretrained(args['teacher_model_path'],
-                                                                      torch_dtype=torch_dtype)
+    #torch_dtype = torch.float16 if config_args['fp16'] else torch.float32
+    teacher_model = CustomRobertaForQuestionAnswering.from_pretrained(args['teacher_model_path'])
     model = CustomRobertaForQuestionAnswering.from_pretrained(args['student_model_path'],
                                                               fit_size=teacher_model.config.hidden_size)
     freeze_model(teacher_model)
@@ -50,7 +50,9 @@ def train(args, dataset, model, tokenizer, teacher=None):
     train_dataloader = DataLoader(dataset,
                                   batch_size=args['batch_size'],
                                   sampler=train_sampler,
-                                  collate_fn=DefaultDataCollator())
+                                  collate_fn=DefaultDataCollator(),
+                                  pin_memory=True,
+                                  num_workers=4)
 
     if args['max_steps'] > 0:
         num_training_steps = args['max_steps']
@@ -82,11 +84,17 @@ def train(args, dataset, model, tokenizer, teacher=None):
         num_training_steps=num_training_steps,
     )
 
+    accelerator = Accelerator(mixed_precision='fp16' if args['fp16'] else 'no',
+                              gradient_accumulation_steps=args['gradient_accumulation_steps'])
+    model, optimizer, training_dataloader, scheduler = accelerator.prepare(
+        model, optimizer, train_dataloader, scheduler
+    )
+
     global_step = 0
     tr_loss = 0.0
 
-    if args['fp16']:
-        scaler = GradScaler(growth_interval=args['growth_interval'])
+    #if args['fp16']:
+    #    scaler = GradScaler(growth_interval=args['growth_interval'])
 
     optimizer.zero_grad()
     train_iterator = trange(int(args['num_epochs']), desc="Epoch")
@@ -95,22 +103,19 @@ def train(args, dataset, model, tokenizer, teacher=None):
     loss_states_func = nn.MSELoss()
     loss_distill_func = nn.KLDivLoss(reduction='batchmean')
 
+    model.train()
     for epoch in train_iterator:
         epoch_iterator = tqdm(train_dataloader, desc="Iteration")
         for step, batch in enumerate(epoch_iterator):
-            optimizer.zero_grad()
-            model.train()
-            if teacher is not None:
-                teacher.eval()
+            with accelerator.accumulate(model):
+                if teacher is not None:
+                    teacher.eval()
 
-            inputs = {'input_ids': batch['input_ids'].to(model.device),
-                      'attention_mask': batch['attention_mask'].to(model.device),
-                      'start_positions': batch['start_positions'].to(model.device),
-                      'end_positions': batch['end_positions'].to(model.device)}
+                inputs = {'input_ids': batch['input_ids'].to(model.device),
+                          'attention_mask': batch['attention_mask'].to(model.device),
+                          'start_positions': batch['start_positions'].to(model.device),
+                          'end_positions': batch['end_positions'].to(model.device)}
 
-            with torch.autocast(device_type="cuda",
-                                dtype=torch.float16 if args['fp16'] else torch.float32,
-                                enabled=True if args['fp16'] else False):
                 outputs = model(**inputs, return_dict=True, output_hidden_states=True, output_attentions=True, is_student=True)
                 loss_task, start_logits, end_logits, hidden_states, attentions, seq_output = outputs.loss, outputs.start_logits, outputs.end_logits, outputs.hidden_states[-1], outputs.attentions, outputs.sequence_output
 
@@ -169,46 +174,24 @@ def train(args, dataset, model, tokenizer, teacher=None):
 
                     loss_distill = loss_start + loss_end
 
-                    loss = loss_distill + loss_task + attention_loss + hidden_loss
+                    loss = (loss_distill + loss_task + attention_loss + hidden_loss) / args['gradient_accumulation_steps']
 
-            if args['fp16']:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
+                accelerator.backward(loss)
+                accelerator.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
 
-            is_doing_warmup = global_step < num_warmup_steps
-            logging.info(f'Epoch {epoch+1}/{args["num_epochs"]}, Step {step+1}, Global: {global_step}/{num_training_steps} - Warmup: {"Yes" if is_doing_warmup else "No"} - Loss: {loss.item()} - Loss task: {loss_task.item()} - Loss distill: {loss_distill.item()}')
+                is_doing_warmup = global_step < num_warmup_steps
+                logging.info(f'Epoch {epoch+1}/{args["num_epochs"]}, Step {step+1}, Global: {global_step}/{num_training_steps} - Warmup: {"Yes" if is_doing_warmup else "No"} - Loss: {loss.item()} - Loss task: {loss_task.item()} - Loss distill: {loss_distill.item()}')
 
-            tr_loss += loss.item()
-            if (step + 1) % args['gradient_accumulation_steps'] == 0:
-                if args['fp16']:
-                    scaler.step(optimizer)
+                tr_loss += loss.item()
 
-                    scale = scaler.get_scale()
-                    scaler.update()
-
-                    skip_lr_sched = (scale > scaler.get_scale())
-
-                    if not skip_lr_sched:
-                        scheduler.step()
-
-                    # NaN scaling fix: see https://github.com/pytorch/pytorch/issues/40497
-                    if scaler.get_growth_interval() != 2000 and global_step > 1000:
-                        scaler.set_growth_interval(2000)
-
-                else:
-                    optimizer.step()
-                    scheduler.step()  # Update learning rate schedule
-
-                #model.zero_grad()
+                optimizer.step()
+                scheduler.step()  # Update learning rate schedule
+                optimizer.zero_grad()
                 global_step += 1
 
-            if 0 < args['max_steps'] < global_step:
-                epoch_iterator.close()
-                break
+                if 0 < args['max_steps'] < global_step:
+                    epoch_iterator.close()
+                    break
 
         # Save model checkpoint
         output_dir = os.path.join(args['checkpoint_dir'], f'checkpoint-epoch-{epoch}')

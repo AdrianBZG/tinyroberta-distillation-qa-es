@@ -14,9 +14,9 @@ class CustomRobertaForQuestionAnswering(RobertaPreTrainedModel):
         self.num_labels = config.num_labels
 
         self.roberta = RobertaModel(config, add_pooling_layer=False)
-        self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels)
+        self.qa_outputs = nn.Linear(config.hidden_size, config.num_labels, dtype=self.roberta.dtype)
         self.fit_size = fit_size
-        self.fit_dense = nn.Linear(config.hidden_size, fit_size)
+        self.fit_dense = nn.Linear(config.hidden_size, fit_size, dtype=self.roberta.dtype)
 
         # Initialize weights and apply final processing
         self.post_init()
