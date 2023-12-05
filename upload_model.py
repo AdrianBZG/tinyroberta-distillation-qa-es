@@ -31,10 +31,13 @@ if __name__ == "__main__":
 
     # Upload model
     REPO_NAME = ""
-    torch_dtype = torch.float16 if config_args['fp16'] else torch.float32
-    model = AutoModelForQuestionAnswering.from_pretrained(config_args['model_path'],
-                                                          torch_dtype=torch_dtype)
-    model.push_to_hub(REPO_NAME)
+    MODEL_PATH = 'models/tinyroberta-squad-es-distilled'
 
-    tokenizer = AutoTokenizer.from_pretrained(config_args['model_path'])
+    torch_dtype = torch.float16 if config_args['fp16'] else torch.float32
+
+    model = AutoModelForQuestionAnswering.from_pretrained(MODEL_PATH,
+                                                          torch_dtype=torch_dtype)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+
+    model.push_to_hub(REPO_NAME)
     tokenizer.push_to_hub(REPO_NAME)

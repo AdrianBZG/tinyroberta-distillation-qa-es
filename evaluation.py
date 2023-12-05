@@ -105,6 +105,8 @@ def calculate_metrics(metric, squad_dataset, predicted_answers):
     ]
 
     metrics = metric.compute(predictions=predicted_answers, references=theoretical_answers)
+    logging.info(f"First 5 groundtruth answers: {theoretical_answers[:5]}")
+    logging.info(f"First 5 predicted answers: {predicted_answers[:5]}")
     return metrics
 
 

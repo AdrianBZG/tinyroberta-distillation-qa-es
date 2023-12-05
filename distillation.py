@@ -5,11 +5,12 @@ import shutil
 import os
 import json
 import torch
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, RandomSampler
 from torch.optim import AdamW
-from torch.cuda.amp import GradScaler
 import logging
 from tqdm import tqdm, trange
 from transformers import (AutoTokenizer, AutoModelForQuestionAnswering, TrainingArguments, Trainer, DefaultDataCollator,
@@ -86,7 +87,7 @@ def train(args, dataset, model, tokenizer, teacher=None):
 
     accelerator = Accelerator(mixed_precision='fp16' if args['fp16'] else 'no',
                               gradient_accumulation_steps=args['gradient_accumulation_steps'])
-    model, optimizer, training_dataloader, scheduler = accelerator.prepare(
+    model, optimizer, train_dataloader, scheduler = accelerator.prepare(
         model, optimizer, train_dataloader, scheduler
     )
 
